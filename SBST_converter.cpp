@@ -12,7 +12,7 @@
 using namespace std;
 
 // Number of timeframe expansion
-const int timeframe = 1;
+const int timeframe = 4;
 
 // Satsolver Basic CNF API
 Var addANDCNF(SatSolver& s, Var a, Var b, bool a_bool, bool b_bool) {
@@ -43,6 +43,10 @@ Var addEqualCNF(SatSolver& s, Var a, Var b) {
     Var out2 = addANDCNF(s, a, b, false, false);    // a * b
     Var out = addORCNF(s, out1, out2, false, false);    // (~a * ~b) + (a * b)
     return out;
+}
+
+int getValue(SatSolver& s, Var target) {
+    return s.getValue(target);
 }
 
 // class of design IO
@@ -121,6 +125,19 @@ void AssumePort(SatSolver& s, Port& p, bool val) {
     }
 }
 
+// Assume port value in specific timeframe
+void AssumATPGport(SatSolver& solver, Var var_num, char c) {
+    if (c == '0') {
+        solver.assumeProperty(var_num, 0);
+    }
+    else if (c == '1') {
+        solver.assumeProperty(var_num, 1);
+    }
+    // cout << var_num << " " << c << endl;
+
+    return;
+}
+
 // Read python dictionary and convert it to map
 map<string, string> ReadDictionary(string file_name) {
     map<string, string> dict;
@@ -164,37 +181,13 @@ map<string, string> ReadDictionary(string file_name) {
     return dict;
 }
 
-int main(int argc, char* argv[]) {
-    fstream fin;
-    fstream fout;
-    // Input arguments
-    string exec_name = argv[0];
-    string equation_file_name = argv[1];
-    string output_file_name = argv[2];
-    string DQ_map_file_name = argv[3];
-    string DQN_map_file_name = argv[4];
-    string DFF_pipeline_map_file_name = argv[5];
-    string DFF_GPR_map_file_name = argv[6];
-    // Open input/output files
-    fin.open(equation_file_name, ios::in);
-    if (!fin) {
-        cout << endl;
-        cout << equation_file_name << " can not be opened! " << endl;
-    }
-    fout.open(output_file_name, ios::out);
-
-    // Random number generator
-    int seed = 35;
-    srand(seed);
-
-    // Initialize SAT solver
-    SatSolver solver;
-    solver.initialize();
-
+Var BuildEquation(SatSolver& solver, fstream& fin, vector<string>& input_list,
+    map<string, Port>& port_map, vector<string>& output_list, map<string, string>& DQ_map,
+    map<string, string>& DQN_map, map<Var, bool>& base_assume_map) {
     // design module name
     string design_name;
     string read_line;
-    
+
     // Parse design module name
     if (getline(fin, read_line)) {
         if (CheckSubString(read_line, ".design_name")) {
@@ -209,13 +202,6 @@ int main(int argc, char* argv[]) {
             cout << design_name << endl;
         }
     }
-
-    // input port name list
-    vector<string> input_list;
-    // Port map
-    map<string, Port> port_map;
-    // output port name list
-    vector<string> output_list;
 
     // Parse input port name
     getline(fin, read_line);
@@ -267,6 +253,7 @@ int main(int argc, char* argv[]) {
     // Solver total variable
     Var var_out = solver.newVar();
     solver.assumeProperty(var_out, 1);
+    base_assume_map[var_out] = 1;
 
     // Start parse combinational logic
     do {
@@ -327,11 +314,17 @@ int main(int argc, char* argv[]) {
             if (right_assignment[i] == ';') {
                 // RHS is *Logic0* or *Logic1*
                 if (stage_string.find("Logic") != std::string::npos) {
+                    bool assume_logic = false;
                     if (stage_string.find("Logic0") != std::string::npos && stage_string.find("\'") != std::string::npos) {
-                        AssumePort(solver, lhs_p, true);
+                        assume_logic = true;
+                        AssumePort(solver, lhs_p, assume_logic);
                     }
                     else {
-                        AssumePort(solver, lhs_p, false);
+                        assume_logic = false;
+                        AssumePort(solver, lhs_p, assume_logic);
+                    }
+                    for (int i=0; i<timeframe; i++) {
+                        base_assume_map[lhs_p.timeFrameVarList[i]] = assume_logic;
                     }
                 }
                 else {  // RHS is single variable
@@ -520,29 +513,11 @@ int main(int argc, char* argv[]) {
                 stage_string += right_assignment[i];
             }
         }
-        // if (!operator_stack.empty() || !operand_stack.empty()) {
-        //     cout << read_line << endl;
-        //     cout << "operator stack:" << endl;
-        //     while (!operator_stack.empty()) {
-        //         cout << operator_stack.top() << " ";
-        //         operator_stack.pop();
-        //     }
-        //     cout << endl;
-        //     cout << "operand stack:" << endl;
-        //     while (!operand_stack.empty()) {
-        //         cout << operand_stack.top() << " ";
-        //         operand_stack.pop();
-        //     }
-        //     cout << endl;
-        // }
-
     } while (getline(fin, read_line));
 
     cout << "Parse internal logic successfully!!!" << endl;
 
     // Read DQ map
-    map<string, string> DQ_map = ReadDictionary(DQ_map_file_name);
-    map<string, string> DQN_map = ReadDictionary(DQN_map_file_name);
     for (auto i = DQ_map.begin(); i != DQ_map.end(); i++) {
         string D_port = i->first;
         Port Dp;
@@ -566,82 +541,422 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // for (auto i = DQN_map.begin(); i != DQN_map.end(); i++) {
-    //     string D_port = i->first;
-    //     Port Dp;
-    //     if (port_map.find(D_port) != port_map.end()) {
-    //         Dp = port_map[D_port];
-    //     }
-    //     else {
-    //         cout << D_port << " can not be found in port map!!!" << endl;
-    //     }
-    //     string QN_port = i->second;
-    //     Port QNp;
-    //     if (port_map.find(QN_port) != port_map.end()) {
-    //         QNp = port_map[QN_port];
-    //     }
-    //     else {
-    //         cout << QN_port << " can not be found in port map!!!" << endl;
-    //     }
-    //     for (int time=0; time<timeframe-1; time++) {
-    //         Var stage_var = addXORCNF(solver, QNp.timeFrameVarList[time], Dp.timeFrameVarList[time+1], false, false);
-    //         var_out = addANDCNF(solver, var_out, stage_var, false, false);
-    //     }
-    // }
+    // Read DQN map
+    for (auto i = DQN_map.begin(); i != DQN_map.end(); i++) {
+        string D_port = i->first;
+        Port Dp;
+        if (port_map.find(D_port) != port_map.end()) {
+            Dp = port_map[D_port];
+        }
+        else {
+            cout << D_port << " can not be found in port map!!!" << endl;
+        }
+        string QN_port = i->second;
+        Port QNp;
+        if (port_map.find(QN_port) != port_map.end()) {
+            QNp = port_map[QN_port];
+        }
+        else {
+            cout << QN_port << " can not be found in port map!!!" << endl;
+        }
+        for (int time=0; time<timeframe-1; time++) {
+            Var stage_var = addXORCNF(solver, QNp.timeFrameVarList[time], Dp.timeFrameVarList[time+1], false, false);
+            var_out = addANDCNF(solver, var_out, stage_var, false, false);
+        }
+    }
 
     cout << "Parse register DQ map successfully!!!" << endl;
 
     // Set rst_n = 1
-    // Port p = port_map["rst_n"];
-    // for (int i=0; i<timeframe; i++) {
-    //     solver.assumeProperty(p.timeFrameVarList[i], 1);
-    // }
+    Port p = port_map["rst_n"];
+    for (int i=0; i<timeframe; i++) {
+        solver.assumeProperty(p.timeFrameVarList[i], 1);
+        base_assume_map[p.timeFrameVarList[i]] = 1;
+    }
+
+    return var_out;
+}
+
+// Make base assumption on boolean formula after assumption release
+void ReAssumeBaseAssumption(SatSolver& solver, map<Var, bool>& base_assume_map) {
+    for (auto i = base_assume_map.begin(); i != base_assume_map.end(); i++) {
+        solver.assumeProperty(i->first, i->second);
+    }
+
+    return;
+}
+
+// Make ATPG assumption on the target scan registers
+void AssumeATPG(SatSolver& solver, map<string, Port>& port_map, map<string, string>& DFF_pipeline_map,
+     map<string, string>& DFF_GPR_map, map<string, string>& ATPG_pattern_map, int pattern_idx)
+{
+    // string of reg or input ATPG assignment
+    // Parse I_MEM_rdata string
+    string IF1_str = "";
+    string IF2_str = "";
+    for (int i=31; i>=0 ; i--) {
+        string target_str = "I_MEM_rdata[" + to_string(i) + "]";
+        string I_MEM_rdata_string = ATPG_pattern_map[target_str];
+
+        if (pattern_idx == 0) {
+            IF1_str += I_MEM_rdata_string[pattern_idx];
+        }
+        else {
+            IF1_str += I_MEM_rdata_string[2*pattern_idx - 1];
+            IF2_str += I_MEM_rdata_string[2*pattern_idx];
+        }
+    }
+    cout << "In " << pattern_idx << ": " << endl;
+    cout << "IF1: " << IF1_str << endl;
+    cout << "IF2: " << IF2_str << endl;
+
+    // Parse GPR string
+    vector<string> GPR_string;
+    for (int GPR_idx=0; GPR_idx<32; GPR_idx++) {
+        string cur_GPR_string = "";
+        for (int GPR_slice_idx = 31; GPR_slice_idx>=0; GPR_slice_idx--) {
+            string target_str = "register_reg_" + to_string(GPR_idx) + "__" + to_string(GPR_slice_idx) + "_";
+            string register_reg_string = ATPG_pattern_map[target_str];
+            cur_GPR_string += register_reg_string[pattern_idx];
+        }
+        GPR_string.push_back(cur_GPR_string);
+    }
+    for (int i=0; i<GPR_string.size(); i++) {
+        cout << "GPR" << i << ": " << GPR_string[i] << endl;
+    }
+
+    // Parse IF_ID pipeline reg
+    char IF_ID_compress_o_reg_str;
+    string IF_ID_instr_o_reg_str = "";
+    IF_ID_compress_o_reg_str = ATPG_pattern_map["IF_ID_compress_o_reg"][pattern_idx];
+    AssumATPGport(solver, port_map[DFF_pipeline_map["IF_ID_compress_o_reg"]].timeFrameVarList[0], IF_ID_compress_o_reg_str);
+    for (int i=31; i>=0; i--) {
+        string target_str = "IF_ID_instr_o_reg_" + to_string(i) + "_";
+        char cur_pattern_str = ATPG_pattern_map[target_str][pattern_idx];
+        IF_ID_instr_o_reg_str += cur_pattern_str;
+        AssumATPGport(solver, port_map[DFF_pipeline_map[target_str]].timeFrameVarList[0], cur_pattern_str);
+    }
+    cout << "IF_ID_compress_o_reg: " << IF_ID_compress_o_reg_str << endl;
+    cout << "IF_ID_instr_o_reg: " << IF_ID_instr_o_reg_str << endl;
+
+    // Parse ID_EX pipeline reg
+    string ID_EX_EX_ALUOp_o_reg_str = "";
+    for (int i=6; i>=0; i--) {
+        string target_str = "ID_EX_EX_ALUOp_o_reg_" + to_string(i) + "_";
+        char cur_pattern_str = ATPG_pattern_map[target_str][pattern_idx];
+        ID_EX_EX_ALUOp_o_reg_str += cur_pattern_str;
+        AssumATPGport(solver, port_map[DFF_pipeline_map[target_str]].timeFrameVarList[0], cur_pattern_str);
+    }
+    cout << "ID_EX_EX_ALUOp_o_reg: " << ID_EX_EX_ALUOp_o_reg_str << endl;
+    char ID_EX_EX_ALUSrc_o_reg_str;
+    ID_EX_EX_ALUSrc_o_reg_str = ATPG_pattern_map["ID_EX_EX_ALUSrc_o_reg"][pattern_idx];
+    AssumATPGport(solver, port_map[DFF_pipeline_map["ID_EX_EX_ALUSrc_o_reg"]].timeFrameVarList[0], ID_EX_EX_ALUSrc_o_reg_str);
+    cout << "ID_EX_EX_ALUSrc_o_reg: " << ID_EX_EX_ALUSrc_o_reg_str << endl;
+    char ID_EX_EX_Jalr_o_reg_str;
+    ID_EX_EX_Jalr_o_reg_str = ATPG_pattern_map["ID_EX_EX_Jalr_o_reg"][pattern_idx];
+    AssumATPGport(solver, port_map[DFF_pipeline_map["ID_EX_EX_Jalr_o_reg"]].timeFrameVarList[0], ID_EX_EX_Jalr_o_reg_str);
+    cout << "ID_EX_EX_Jalr_o_reg: " << ID_EX_EX_Jalr_o_reg_str << endl;
+    char ID_EX_M_MemRead_o_reg_str;
+    ID_EX_M_MemRead_o_reg_str = ATPG_pattern_map["ID_EX_M_MemRead_o_reg"][pattern_idx];
+    AssumATPGport(solver, port_map[DFF_pipeline_map["ID_EX_M_MemRead_o_reg"]].timeFrameVarList[0], ID_EX_M_MemRead_o_reg_str);
+    cout << "ID_EX_M_MemRead_o_reg: " << ID_EX_M_MemRead_o_reg_str << endl;
+    char ID_EX_M_MemWrite_o_reg_str;
+    ID_EX_M_MemWrite_o_reg_str = ATPG_pattern_map["ID_EX_M_MemWrite_o_reg"][pattern_idx];
+    AssumATPGport(solver, port_map[DFF_pipeline_map["ID_EX_M_MemWrite_o_reg"]].timeFrameVarList[0], ID_EX_M_MemWrite_o_reg_str);
+    cout << "ID_EX_M_MemWrite_o_reg: " << ID_EX_M_MemWrite_o_reg_str << endl;
+    string ID_EX_RDaddr_o_reg_str = "";
+    for (int i=4; i>=0; i--) {
+        string target_str = "ID_EX_RDaddr_o_reg_" + to_string(i) + "_";
+        char cur_pattern_str = ATPG_pattern_map[target_str][pattern_idx];
+        ID_EX_RDaddr_o_reg_str += cur_pattern_str;
+        AssumATPGport(solver, port_map[DFF_pipeline_map[target_str]].timeFrameVarList[0], cur_pattern_str);
+    }
+    cout << "ID_EX_RDaddr_o_reg: " << ID_EX_RDaddr_o_reg_str << endl;
+    string ID_EX_RS1addr_o_reg_str = "";
+    for (int i=4; i>=0; i--) {
+        string target_str = "ID_EX_RS1addr_o_reg_" + to_string(i) + "_";
+        char cur_pattern_str = ATPG_pattern_map[target_str][pattern_idx];
+        ID_EX_RS1addr_o_reg_str += cur_pattern_str;
+        AssumATPGport(solver, port_map[DFF_pipeline_map[target_str]].timeFrameVarList[0], cur_pattern_str);
+    }
+    cout << "ID_EX_RS1addr_o_reg: " << ID_EX_RS1addr_o_reg_str << endl;
+    string ID_EX_RS1data_o_reg_str = "";
+    for (int i=31; i>=0; i--) {
+        string target_str = "ID_EX_RS1data_o_reg_" + to_string(i) + "_";
+        char cur_pattern_str = ATPG_pattern_map[target_str][pattern_idx];
+        ID_EX_RS1data_o_reg_str += cur_pattern_str;
+        AssumATPGport(solver, port_map[DFF_pipeline_map[target_str]].timeFrameVarList[0], cur_pattern_str);
+    }
+    cout << "ID_EX_RS1data_o_reg: " << ID_EX_RS1data_o_reg_str << endl;
+    string ID_EX_RS2addr_o_reg_str = "";
+    for (int i=4; i>=0; i--) {
+        string target_str = "ID_EX_RS2addr_o_reg_" + to_string(i) + "_";
+        char cur_pattern_str = ATPG_pattern_map[target_str][pattern_idx];
+        ID_EX_RS2addr_o_reg_str += cur_pattern_str;
+        AssumATPGport(solver, port_map[DFF_pipeline_map[target_str]].timeFrameVarList[0], cur_pattern_str);
+    }
+    cout << "ID_EX_RS2addr_o_reg: " << ID_EX_RS2addr_o_reg_str << endl;
+    string ID_EX_RS2data_o_reg_str = "";
+    for (int i=31; i>=0; i--) {
+        string target_str = "ID_EX_RS2data_o_reg_" + to_string(i) + "_";
+        char cur_pattern_str = ATPG_pattern_map[target_str][pattern_idx];
+        ID_EX_RS2data_o_reg_str += cur_pattern_str;
+        AssumATPGport(solver, port_map[DFF_pipeline_map[target_str]].timeFrameVarList[0], cur_pattern_str);
+    }
+    cout << "ID_EX_RS2data_o_reg: " << ID_EX_RS2data_o_reg_str << endl;
+    string ID_EX_WB_MemtoReg_o_reg_str = "";
+    for (int i=1; i>=0; i--) {
+        string target_str = "ID_EX_WB_MemtoReg_o_reg_" + to_string(i) + "_";
+        char cur_pattern_str = ATPG_pattern_map[target_str][pattern_idx];
+        ID_EX_WB_MemtoReg_o_reg_str += cur_pattern_str;
+        AssumATPGport(solver, port_map[DFF_pipeline_map[target_str]].timeFrameVarList[0], cur_pattern_str);
+    }
+    cout << "ID_EX_WB_MemtoReg_o_reg: " << ID_EX_WB_MemtoReg_o_reg_str << endl;
+    char ID_EX_WB_RegWrite_o_reg_str;
+    ID_EX_WB_RegWrite_o_reg_str = ATPG_pattern_map["ID_EX_WB_RegWrite_o_reg"][pattern_idx];
+    AssumATPGport(solver, port_map[DFF_pipeline_map["ID_EX_WB_RegWrite_o_reg"]].timeFrameVarList[0], ID_EX_WB_RegWrite_o_reg_str);
+    cout << "ID_EX_WB_RegWrite_o_reg: " << ID_EX_WB_RegWrite_o_reg_str << endl;
+    char ID_EX_compress_o_reg_str;
+    ID_EX_compress_o_reg_str = ATPG_pattern_map["ID_EX_compress_o_reg"][pattern_idx];
+    AssumATPGport(solver, port_map[DFF_pipeline_map["ID_EX_compress_o_reg"]].timeFrameVarList[0], ID_EX_compress_o_reg_str);
+    cout << "ID_EX_compress_o_reg: " << ID_EX_compress_o_reg_str << endl;
+    string ID_EX_funct3_o_reg_str = "";
+    for (int i=2; i>=0; i--) {
+        string target_str = "ID_EX_funct3_o_reg_" + to_string(i) + "_";
+        char cur_pattern_str = ATPG_pattern_map[target_str][pattern_idx];
+        ID_EX_funct3_o_reg_str += cur_pattern_str;
+        AssumATPGport(solver, port_map[DFF_pipeline_map[target_str]].timeFrameVarList[0], cur_pattern_str);
+    }
+    cout << "ID_EX_funct3_o_reg: " << ID_EX_funct3_o_reg_str << endl;
+    char ID_EX_funct7_o_reg_str;
+    ID_EX_funct7_o_reg_str = ATPG_pattern_map["ID_EX_funct7_o_reg"][pattern_idx];
+    AssumATPGport(solver, port_map[DFF_pipeline_map["ID_EX_funct7_o_reg"]].timeFrameVarList[0], ID_EX_funct7_o_reg_str);
+    cout << "ID_EX_funct7_o_reg: " << ID_EX_funct7_o_reg_str << endl;
+    string ID_EX_imm_o_reg_str = "";
+    for (int i=21; i>=0; i--) {
+        string target_str = "";
+        if (i == 21) {
+            target_str = "ID_EX_imm_o_reg_31_"; 
+        }
+        else {
+            target_str = "ID_EX_imm_o_reg_" + to_string(i) + "_";
+        }
+        char cur_pattern_str = ATPG_pattern_map[target_str][pattern_idx];
+        ID_EX_imm_o_reg_str += cur_pattern_str;
+        AssumATPGport(solver, port_map[DFF_pipeline_map[target_str]].timeFrameVarList[0], cur_pattern_str);
+    }
+    cout << "ID_EX_imm_o_reg: " << ID_EX_imm_o_reg_str << endl;
+
+    // Parse EX_MEM pipeline reg
+    string ALU_result_o_reg_str = "";
+    for (int i=31; i>=0; i--) {
+        string target_str = "EX_MEM_ALU_result_o_reg_" + to_string(i) + "_";
+        char cur_pattern_str = ATPG_pattern_map[target_str][pattern_idx];
+        ALU_result_o_reg_str += cur_pattern_str;
+        AssumATPGport(solver, port_map[DFF_pipeline_map[target_str]].timeFrameVarList[0], cur_pattern_str);
+    }
+    cout << "EX_MEM_ALU_result_o_reg: " << ALU_result_o_reg_str << endl;
+    char EX_MEM_MEM_reg_hazard_o_reg_str;
+    EX_MEM_MEM_reg_hazard_o_reg_str = ATPG_pattern_map["EX_MEM_MEM_reg_hazard_o_reg"][pattern_idx];
+    AssumATPGport(solver, port_map[DFF_pipeline_map["EX_MEM_MEM_reg_hazard_o_reg"]].timeFrameVarList[0], EX_MEM_MEM_reg_hazard_o_reg_str);
+    cout << "EX_MEM_MEM_reg_hazard_o_reg: " << EX_MEM_MEM_reg_hazard_o_reg_str << endl;
+    char EX_MEM_M_MemRead_o_reg_str;
+    EX_MEM_M_MemRead_o_reg_str = ATPG_pattern_map["EX_MEM_M_MemRead_o_reg"][pattern_idx];
+    AssumATPGport(solver, port_map[DFF_pipeline_map["EX_MEM_M_MemRead_o_reg"]].timeFrameVarList[0], EX_MEM_M_MemRead_o_reg_str);
+    cout << "EX_MEM_M_MemRead_o_reg: " << EX_MEM_M_MemRead_o_reg_str << endl;
+    char EX_MEM_M_MemWrite_o_reg_str;
+    EX_MEM_M_MemWrite_o_reg_str = ATPG_pattern_map["EX_MEM_M_MemWrite_o_reg"][pattern_idx];
+    AssumATPGport(solver, port_map[DFF_pipeline_map["EX_MEM_M_MemWrite_o_reg"]].timeFrameVarList[0], EX_MEM_M_MemWrite_o_reg_str);
+    cout << "EX_MEM_M_MemWrite_o_reg: " << EX_MEM_M_MemWrite_o_reg_str << endl;
+    string EX_MEM_RDaddr_o_reg_str = "";
+    for (int i=4; i>=0; i--) {
+        string target_str = "EX_MEM_RDaddr_o_reg_" + to_string(i) + "_";
+        char cur_pattern_str = ATPG_pattern_map[target_str][pattern_idx];
+        EX_MEM_RDaddr_o_reg_str += cur_pattern_str;
+        AssumATPGport(solver, port_map[DFF_pipeline_map[target_str]].timeFrameVarList[0], cur_pattern_str);
+    }
+    cout << "EX_MEM_RDaddr_o_reg: " << EX_MEM_RDaddr_o_reg_str << endl;
+    string EX_MEM_RS2data_o_reg_str = "";
+    for (int i=31; i>=0; i--) {
+        string target_str = "EX_MEM_RS2data_o_reg_" + to_string(i) + "_";
+        char cur_pattern_str = ATPG_pattern_map[target_str][pattern_idx];
+        EX_MEM_RS2data_o_reg_str += cur_pattern_str;
+        AssumATPGport(solver, port_map[DFF_pipeline_map[target_str]].timeFrameVarList[0], cur_pattern_str); 
+    }
+    cout << "EX_MEM_RS2data_o_reg: " << EX_MEM_RS2data_o_reg_str << endl;
+    string EX_MEM_WB_MemtoReg_o_reg_str = "";
+    for (int i=1; i>=0; i--) {
+        string target_str = "EX_MEM_WB_MemtoReg_o_reg_" + to_string(i) + "_";
+        char cur_pattern_str = ATPG_pattern_map[target_str][pattern_idx];
+        EX_MEM_WB_MemtoReg_o_reg_str += cur_pattern_str;
+        AssumATPGport(solver, port_map[DFF_pipeline_map[target_str]].timeFrameVarList[0], cur_pattern_str);
+    }
+    cout << "EX_MEM_WB_MemtoReg_o_reg: " << EX_MEM_WB_MemtoReg_o_reg_str << endl;
+    char EX_MEM_WB_RegWrite_o_reg_str;
+    EX_MEM_WB_RegWrite_o_reg_str = ATPG_pattern_map["EX_MEM_WB_RegWrite_o_reg"][pattern_idx];
+    AssumATPGport(solver, port_map[DFF_pipeline_map["EX_MEM_WB_RegWrite_o_reg"]].timeFrameVarList[0], EX_MEM_WB_RegWrite_o_reg_str);
+    cout << "EX_MEM_WB_RegWrite_o_reg: " << EX_MEM_WB_RegWrite_o_reg_str << endl;
+
+    // Parse MEM_WB pipeline reg
+    string MEM_WB_ALU_result_o_reg_str = "";
+    for (int i=31; i>=0; i--) {
+        string target_str = "MEM_WB_ALU_result_o_reg_" + to_string(i) + "_";
+        char cur_pattern_str = ATPG_pattern_map[target_str][pattern_idx];
+        MEM_WB_ALU_result_o_reg_str += cur_pattern_str;
+        AssumATPGport(solver, port_map[DFF_pipeline_map[target_str]].timeFrameVarList[0], cur_pattern_str);
+    }
+    cout << "MEM_WB_ALU_result_o_reg: " << MEM_WB_ALU_result_o_reg_str << endl;
+    string MEM_WB_RDaddr_o_reg_str = "";
+    for (int i=4; i>=0; i--) {
+        string target_str = "MEM_WB_RDaddr_o_reg_" + to_string(i) + "_";
+        char cur_pattern_str = ATPG_pattern_map[target_str][pattern_idx];
+        MEM_WB_RDaddr_o_reg_str += cur_pattern_str;
+        AssumATPGport(solver, port_map[DFF_pipeline_map[target_str]].timeFrameVarList[0], cur_pattern_str);
+    }
+    cout << "MEM_WB_RDaddr_o_reg: " << MEM_WB_RDaddr_o_reg_str << endl;
+    string MEM_WB_WB_MemtoReg_o_reg_str = "";
+    for (int i=1; i>=0; i--) {
+        string target_str = "MEM_WB_WB_MemtoReg_o_reg_" + to_string(i) + "_";
+        char cur_pattern_str = ATPG_pattern_map[target_str][pattern_idx];
+        MEM_WB_WB_MemtoReg_o_reg_str += cur_pattern_str;
+        AssumATPGport(solver, port_map[DFF_pipeline_map[target_str]].timeFrameVarList[0], cur_pattern_str);
+    }
+    cout << "MEM_WB_WB_MemtoReg_o_reg: " << MEM_WB_WB_MemtoReg_o_reg_str << endl;
+    char MEM_WB_WB_RegWrite_o_reg_str;
+    MEM_WB_WB_RegWrite_o_reg_str = ATPG_pattern_map["MEM_WB_WB_RegWrite_o_reg"][pattern_idx];
+    AssumATPGport(solver, port_map[DFF_pipeline_map["MEM_WB_WB_RegWrite_o_reg"]].timeFrameVarList[0], MEM_WB_WB_RegWrite_o_reg_str);
+    cout << "MEM_WB_WB_RegWrite_o_reg: " << MEM_WB_WB_RegWrite_o_reg_str << endl;
+    string MEM_WB_data_o_reg_str = "";
+    for (int i=31; i>=0; i--) {
+        string target_str = "MEM_WB_data_o_reg_" + to_string(i) + "_";
+        char cur_pattern_str = ATPG_pattern_map[target_str][pattern_idx];
+        MEM_WB_data_o_reg_str += cur_pattern_str;
+        AssumATPGport(solver, port_map[DFF_pipeline_map[target_str]].timeFrameVarList[0], cur_pattern_str);
+    }
+    cout << "MEM_WB_data_o_reg: " << MEM_WB_data_o_reg_str << endl;
+    
+
+    return;
+}
+
+int main(int argc, char* argv[]) {
+    fstream fin;
+    fstream fout;
+    // Input arguments
+    string exec_name = argv[0];
+    string equation_file_name = argv[1];
+    string output_file_name = argv[2];
+    string DQ_map_file_name = argv[3];
+    string DQN_map_file_name = argv[4];
+    string DFF_pipeline_map_file_name = argv[5];
+    string DFF_GPR_map_file_name = argv[6];
+    string ATPG_pattern_name = argv[7];
+    // Open input/output files
+    fin.open(equation_file_name, ios::in);
+    if (!fin) {
+        cout << endl;
+        cout << equation_file_name << " can not be opened! " << endl;
+    }
+    fout.open(output_file_name, ios::out);
+
+    // Random number generator
+    int seed = 35;
+    srand(seed);
+
+    // Initialize SAT solver
+    SatSolver solver;
+    solver.initialize();
+
+    // input port name list
+    vector<string> input_list;
+    // Port map
+    map<string, Port> port_map;
+    // output port name list
+    vector<string> output_list;
+
+    // Read DQ map
+    map<string, string> DQ_map = ReadDictionary(DQ_map_file_name);
+    // Read DQN map
+    map<string, string> DQN_map = ReadDictionary(DQN_map_file_name);
 
     // Read DFF map
     map<string, string> DFF_pipeline_map = ReadDictionary(DFF_pipeline_map_file_name);
     map<string, string> DFF_GPR_map = ReadDictionary(DFF_GPR_map_file_name);
 
+    // Read ATPG pattern
+    map<string, string> ATPG_pattern_map = ReadDictionary(ATPG_pattern_name);
+
+    // Record Base assumption var list
+    map<Var, bool> base_assume_map;
+
+    // Build SAT equation
+    Var var_out = BuildEquation(solver, fin, input_list, port_map, output_list, DQ_map, DQN_map, base_assume_map);
+
+    cout << "Building circuit equation successfully!!!" << endl;
+
+    int ATPG_pattern_count = ATPG_pattern_map["register_reg_25__28_"].size();
+    int SAT_pattern_count = 0;
+    // int ATPG_pattern_count = 5;
+    cout << ATPG_pattern_count << " of ATPG pattern to be converted!!!" << endl;
+
+    for (int i=0; i<ATPG_pattern_count; i++) {
+        AssumeATPG(solver, port_map, DFF_pipeline_map, DFF_GPR_map, ATPG_pattern_map, i);
+
+        // Set Satisfiable & solve the input variable
+        solver.assumeProperty(var_out, true);
+        bool result = solver.assumpSolve();
+        solver.printStats();
+        cout << (result ? "SAT" : "UNSAT") << endl;
+        SAT_pattern_count = (result) ? SAT_pattern_count + 1 : SAT_pattern_count;
+
+        // clear all the assumption & reassume base assumption
+        solver.assumeRelease();
+        ReAssumeBaseAssumption(solver, base_assume_map);
+    }
+
+    cout << "SATISFIABLE scan pattern / Total scan pattern: " << SAT_pattern_count << "/" << ATPG_pattern_count << endl;
+
     // Set IF-ID reg 11100101000000010000000100010011
-    // solver.assumeProperty(port_map["IF_ID_instr_o_reg_0_"].timeFrameVarList[0], 1);
-    // solver.assumeProperty(port_map["IF_ID_instr_o_reg_1_"].timeFrameVarList[0], 1);
-    // solver.assumeProperty(port_map["IF_ID_instr_o_reg_2_"].timeFrameVarList[0], 1);
-    // solver.assumeProperty(port_map["IF_ID_instr_o_reg_3_"].timeFrameVarList[0], 0);
-    // solver.assumeProperty(port_map["IF_ID_instr_o_reg_4_"].timeFrameVarList[0], 0);
-    // solver.assumeProperty(port_map["IF_ID_instr_o_reg_5_"].timeFrameVarList[0], 1);
-    // solver.assumeProperty(port_map["IF_ID_instr_o_reg_6_"].timeFrameVarList[0], 0);
-    // solver.assumeProperty(port_map["IF_ID_instr_o_reg_7_"].timeFrameVarList[0], 1);
-    // solver.assumeProperty(port_map["IF_ID_instr_o_reg_8_"].timeFrameVarList[0], 0);
-    // solver.assumeProperty(port_map["IF_ID_instr_o_reg_9_"].timeFrameVarList[0], 0);
-    // solver.assumeProperty(port_map["IF_ID_instr_o_reg_10_"].timeFrameVarList[0], 0);
-    // solver.assumeProperty(port_map["IF_ID_instr_o_reg_11_"].timeFrameVarList[0], 0);
-    // solver.assumeProperty(port_map["IF_ID_instr_o_reg_12_"].timeFrameVarList[0], 0);
-    // solver.assumeProperty(port_map["IF_ID_instr_o_reg_13_"].timeFrameVarList[0], 0);
-    // solver.assumeProperty(port_map["IF_ID_instr_o_reg_14_"].timeFrameVarList[0], 0);
-    // solver.assumeProperty(port_map["IF_ID_instr_o_reg_15_"].timeFrameVarList[0], 1);
-    // solver.assumeProperty(port_map["IF_ID_instr_o_reg_16_"].timeFrameVarList[0], 0);
-    // solver.assumeProperty(port_map["IF_ID_instr_o_reg_17_"].timeFrameVarList[0], 0);
-    // solver.assumeProperty(port_map["IF_ID_instr_o_reg_18_"].timeFrameVarList[0], 0);
-    // solver.assumeProperty(port_map["IF_ID_instr_o_reg_19_"].timeFrameVarList[0], 0);
-    // solver.assumeProperty(port_map["IF_ID_instr_o_reg_20_"].timeFrameVarList[0], 0);
-    // solver.assumeProperty(port_map["IF_ID_instr_o_reg_21_"].timeFrameVarList[0], 0);
-    // solver.assumeProperty(port_map["IF_ID_instr_o_reg_22_"].timeFrameVarList[0], 0);
-    // solver.assumeProperty(port_map["IF_ID_instr_o_reg_23_"].timeFrameVarList[0], 1);
-    // solver.assumeProperty(port_map["IF_ID_instr_o_reg_24_"].timeFrameVarList[0], 0);
-    // solver.assumeProperty(port_map["IF_ID_instr_o_reg_25_"].timeFrameVarList[0], 0);
-    // solver.assumeProperty(port_map["IF_ID_instr_o_reg_26_"].timeFrameVarList[0], 0);
-    // solver.assumeProperty(port_map["IF_ID_instr_o_reg_27_"].timeFrameVarList[0], 1);
-    // solver.assumeProperty(port_map["IF_ID_instr_o_reg_28_"].timeFrameVarList[0], 0);
-    // solver.assumeProperty(port_map["IF_ID_instr_o_reg_29_"].timeFrameVarList[0], 0);
-    // solver.assumeProperty(port_map["IF_ID_instr_o_reg_30_"].timeFrameVarList[0], 1);
-    // solver.assumeProperty(port_map["IF_ID_instr_o_reg_31_"].timeFrameVarList[0], 1);
+    // cout << port_map[DFF_pipeline_map["IF_ID_instr_o_reg_0_"]].timeFrameVarList[0] << endl;
+    // solver.assumeProperty(port_map[DFF_pipeline_map["IF_ID_instr_o_reg_0_"]].timeFrameVarList[0], 1);
+    // solver.assumeProperty(port_map[DFF_pipeline_map["IF_ID_instr_o_reg_1_"]].timeFrameVarList[0], 1);
+    // solver.assumeProperty(port_map[DFF_pipeline_map["IF_ID_instr_o_reg_2_"]].timeFrameVarList[0], 0);
+    // solver.assumeProperty(port_map[DFF_pipeline_map["IF_ID_instr_o_reg_3_"]].timeFrameVarList[0], 0);
+    // solver.assumeProperty(port_map[DFF_pipeline_map["IF_ID_instr_o_reg_4_"]].timeFrameVarList[0], 1);
+    // solver.assumeProperty(port_map[DFF_pipeline_map["IF_ID_instr_o_reg_5_"]].timeFrameVarList[0], 0);
+    // solver.assumeProperty(port_map[DFF_pipeline_map["IF_ID_instr_o_reg_6_"]].timeFrameVarList[0], 0);
+    // solver.assumeProperty(port_map[DFF_pipeline_map["IF_ID_instr_o_reg_7_"]].timeFrameVarList[0], 0);
+    // solver.assumeProperty(port_map[DFF_pipeline_map["IF_ID_instr_o_reg_8_"]].timeFrameVarList[0], 1);
+    // solver.assumeProperty(port_map[DFF_pipeline_map["IF_ID_instr_o_reg_9_"]].timeFrameVarList[0], 0);
+    // solver.assumeProperty(port_map[DFF_pipeline_map["IF_ID_instr_o_reg_10_"]].timeFrameVarList[0], 0);
+    // solver.assumeProperty(port_map[DFF_pipeline_map["IF_ID_instr_o_reg_11_"]].timeFrameVarList[0], 0);
+    // solver.assumeProperty(port_map[DFF_pipeline_map["IF_ID_instr_o_reg_12_"]].timeFrameVarList[0], 0);
+    // solver.assumeProperty(port_map[DFF_pipeline_map["IF_ID_instr_o_reg_13_"]].timeFrameVarList[0], 0);
+    // solver.assumeProperty(port_map[DFF_pipeline_map["IF_ID_instr_o_reg_14_"]].timeFrameVarList[0], 0);
+    // solver.assumeProperty(port_map[DFF_pipeline_map["IF_ID_instr_o_reg_15_"]].timeFrameVarList[0], 0);
+    // solver.assumeProperty(port_map[DFF_pipeline_map["IF_ID_instr_o_reg_16_"]].timeFrameVarList[0], 1);
+    // solver.assumeProperty(port_map[DFF_pipeline_map["IF_ID_instr_o_reg_17_"]].timeFrameVarList[0], 0);
+    // solver.assumeProperty(port_map[DFF_pipeline_map["IF_ID_instr_o_reg_18_"]].timeFrameVarList[0], 0);
+    // solver.assumeProperty(port_map[DFF_pipeline_map["IF_ID_instr_o_reg_19_"]].timeFrameVarList[0], 0);
+    // solver.assumeProperty(port_map[DFF_pipeline_map["IF_ID_instr_o_reg_20_"]].timeFrameVarList[0], 0);
+    // solver.assumeProperty(port_map[DFF_pipeline_map["IF_ID_instr_o_reg_21_"]].timeFrameVarList[0], 0);
+    // solver.assumeProperty(port_map[DFF_pipeline_map["IF_ID_instr_o_reg_22_"]].timeFrameVarList[0], 0);
+    // solver.assumeProperty(port_map[DFF_pipeline_map["IF_ID_instr_o_reg_23_"]].timeFrameVarList[0], 0);
+    // solver.assumeProperty(port_map[DFF_pipeline_map["IF_ID_instr_o_reg_24_"]].timeFrameVarList[0], 1);
+    // solver.assumeProperty(port_map[DFF_pipeline_map["IF_ID_instr_o_reg_25_"]].timeFrameVarList[0], 0);
+    // solver.assumeProperty(port_map[DFF_pipeline_map["IF_ID_instr_o_reg_26_"]].timeFrameVarList[0], 1);
+    // solver.assumeProperty(port_map[DFF_pipeline_map["IF_ID_instr_o_reg_27_"]].timeFrameVarList[0], 0);
+    // solver.assumeProperty(port_map[DFF_pipeline_map["IF_ID_instr_o_reg_28_"]].timeFrameVarList[0], 0);
+    // solver.assumeProperty(port_map[DFF_pipeline_map["IF_ID_instr_o_reg_29_"]].timeFrameVarList[0], 1);
+    // solver.assumeProperty(port_map[DFF_pipeline_map["IF_ID_instr_o_reg_30_"]].timeFrameVarList[0], 1);
+    // solver.assumeProperty(port_map[DFF_pipeline_map["IF_ID_instr_o_reg_31_"]].timeFrameVarList[0], 1);
 
-    // Set
 
-    for (int i=0; i<output_list.size(); i++) {
-        int x = rand() % 2;
-        bool f = (x == 1) ? 1 : 0;
-        solver.assumeProperty(port_map[output_list[i]].timeFrameVarList[0], f);
-    } 
+    // for (int i=0; i<output_list.size(); i++) {
+    //     int x = rand() % 2;
+    //     bool f = (x == 1) ? 1 : 0;
+    //     solver.assumeProperty(port_map[output_list[i]].timeFrameVarList[0], f);
+    // } 
 
 
     // for (auto i=DFF_pipeline_map.begin(); i != DFF_pipeline_map.end(); i++) {
@@ -679,6 +994,29 @@ int main(int argc, char* argv[]) {
     bool result = solver.assumpSolve();
     solver.printStats();
     cout << (result ? "SAT" : "UNSAT") << endl;
+
+    // Print Satisfiable input value
+    // string ctrl_str = "0000";
+    // for (int i=0; i<4; i++) {
+    //     int val = getValue(solver, port_map["ctrl[" + std::to_string(i) + "]"].timeFrameVarList[0]);
+    //     char v = (val == 0) ? '0' : '1';
+    //     ctrl_str[3-i] = v;
+    // }
+    // cout << "ctrl: " << ctrl_str << endl;
+    // string x_str = "00000000";
+    // for (int i=0; i<8; i++) {
+    //     int val = getValue(solver, port_map["x[" + std::to_string(i) + "]"].timeFrameVarList[0]);
+    //     char v = (val == 0) ? '0' : '1';
+    //     x_str[7-i] = v;
+    // }
+    // cout << "x: " << x_str << endl;
+    // string y_str = "00000000";
+    // for (int i=0; i<8; i++) {
+    //     int val = getValue(solver, port_map["y[" + std::to_string(i) + "]"].timeFrameVarList[0]);
+    //     char v = (val == 0) ? '0' : '1';
+    //     y_str[7-i] = v;
+    // }
+    // cout << "y: " << y_str << endl;
 
     return 0;
 }
